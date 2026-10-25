@@ -1,0 +1,78 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # tsc --noEmit + vite build (TypeScript, без Babel)
+      - name: Build
+        run: npm run build
+        env:
+          # Адрес бэкенда: Settings -> Secrets and variables -> Actions -> Variables -> VITE_API_BASE (необязательно)
+          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that the site is up
+        env:
+          SITE_URL: ${{ needs.deploy.outputs.page_url || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+        run: |
+          set -e
+          echo "Checking $SITE_URL"
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o page.html -w "%{http_code}" "$SITE_URL" || true)
+            [ "$code" = "200" ] && break
+            echo "Attempt $i: HTTP $code, retrying..."
+            sleep 10
+          done
+          [ "$code" = "200" ] || { echo "Site returned HTTP $code"; exit 1; }
+          grep -q 'id="root"' page.html || { echo "No #root in page"; exit 1; }
+          js=$(grep -oE 'src="[^"]+\.js"' page.html | head -1 | sed -E 's/src="(.*)"/\1/')
+          [ -n "$js" ] || { echo "No JS bundle in page"; exit 1; }
+          js=${js#./}
+          jscode=$(curl -s -o /dev/null -w "%{http_code}" "${SITE_URL%/}/$js")
+          [ "$jscode" = "200" ] || { echo "JS bundle returned HTTP $jscode"; exit 1; }
+          echo "Site is up, bundle loads."
